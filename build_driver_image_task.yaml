@@ -1,0 +1,204 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: buildah-driver-image
+spec:
+  description: 'Modified buildah task tailored to generate an NVIDIA driver image
+    using the driver-toolkit '
+  params:
+  - description: Reference of the NVIDIA driver image buildah will produce
+    name: IMAGE_NAME
+    type: string
+  - description: The driver-toolkit image
+    name: DRIVER_TOOLKIT_IMAGE
+    type: string
+  - description: Openshift version
+    name: OPENSHIFT_VERSION
+    type: string
+  - default: https://us.download.nvidia.com/tesla
+    description: NVIDIA base URL for downloads
+    name: NVIDIA_BASE_URL
+    type: string
+  - description: NVIDIA driver version
+    name: DRIVER_VERSION
+    type: string
+  - default: passthrough
+    description: NVIDIA driver type
+    name: DRIVER_TYPE
+    type: string
+  - default: ""
+    description: NVIDIA driver stream type
+    name: DRIVER_STREAM_TYPE
+    type: string
+  - default: "false"
+    description: Use NVIDIA Linux Open GPU Kernel Module Source
+    name: DRIVER_OPEN
+    type: string
+  - description: NVIDIA CUDA version
+    name: CUDA_VERSION
+    type: string
+  - default: x86_64
+    description: Build architecture
+    name: BUILD_ARCH
+    type: string
+  - default: x86_64
+    description: Target architecture
+    name: TARGET_ARCH
+    type: string
+  - default: registry.redhat.io/rhel8/buildah@sha256:3d505d9c0f5d4cd5a4ec03b8d038656c6cdbdf5191e00ce6388f7e0e4d2f1b74
+    description: The location of the buildah builder image.
+    name: BUILDER_IMAGE
+    type: string
+  - default: vfs
+    description: Set buildah storage driver
+    name: STORAGE_DRIVER
+    type: string
+  - default: ./Dockerfile
+    description: Path to the Dockerfile to build.
+    name: DOCKERFILE
+    type: string
+  - default: .
+    description: Path to the directory to use as context.
+    name: CONTEXT
+    type: string
+  - default: "true"
+    description: Verify the TLS on the registry endpoint (for push/pull to a non-TLS
+      registry)
+    name: TLSVERIFY
+    type: string
+  - default: oci
+    description: The format of the built container, oci or docker
+    name: FORMAT
+    type: string
+  - default: ""
+    description: Extra parameters passed for the build command when building images.
+    name: BUILD_EXTRA_ARGS
+    type: string
+  - default: ""
+    description: Extra parameters passed for the push command when pushing images.
+    name: PUSH_EXTRA_ARGS
+    type: string
+  - default: "false"
+    description: Skip pushing the built image
+    name: SKIP_PUSH
+    type: string
+  results:
+  - description: Digest of the image just built.
+    name: IMAGE_DIGEST
+    type: string
+  - description: Image repository where the built image would be pushed to
+    name: IMAGE_URL
+    type: string
+  steps:
+  - computeResources: {}
+    env:
+    - name: STORAGE_DRIVER
+      value: $(params.STORAGE_DRIVER)
+    image: $(params.BUILDER_IMAGE)
+    name: build-and-push
+    script: |
+      DRIVER_TOOLKIT_CONTAINER=$(buildah from $(params.DRIVER_TOOLKIT_IMAGE))
+
+      # jq is not available in the driver-toolkit image so we use grep PCRE
+      RHEL_VERSION=$(buildah run ${DRIVER_TOOLKIT_CONTAINER} cat /etc/driver-toolkit-release.json | grep -Po '"RHEL_VERSION": "[Vv]?\K.*?(?=")')
+      KERNEL_VERSION=$(buildah run ${DRIVER_TOOLKIT_CONTAINER} cat /etc/driver-toolkit-release.json | grep -Po '"KERNEL_VERSION": "[Vv]?\K.*?(?=")')
+
+      # container cleanup
+      buildah rm ${DRIVER_TOOLKIT_CONTAINER}
+
+      # set major version number of RHEL
+      RHEL_VERSION_MAJOR=$(echo "${RHEL_VERSION}" | cut -d '.' -f 1)
+
+      OS_TAG=rhcos$(echo $(params.OPENSHIFT_VERSION) | awk -F. '{print $1"."$2}')
+
+      echo ${OS_TAG}
+
+      # set CUDA distro version
+      CUDA_DIST=ubi${RHEL_VERSION_MAJOR}
+
+      KERNEL_VERSION_NOARCH=$(echo "${KERNEL_VERSION}" | sed "s/\.$(params.TARGET_ARCH)//")
+      KERNEL_VERSION_TAG=$(echo "${KERNEL_VERSION_NOARCH}.$(params.BUILD_ARCH)" | sed "s/+/_/")
+
+      ENTITLEMENT_VOLUME=""
+
+      if [[ "$(workspaces.rhel-entitlement.bound)" == "true" ]]; then
+        ENTITLEMENT_VOLUME="--volume /tmp/entitlement:/etc/pki/entitlement:ro"
+      fi
+
+      buildah bud ${ENTITLEMENT_VOLUME} $(params.BUILD_EXTRA_ARGS) \
+        --build-arg DRIVER_TOOLKIT_IMAGE=$(params.DRIVER_TOOLKIT_IMAGE) \
+        --build-arg DRIVER_VERSION=$(params.DRIVER_VERSION) \
+        --build-arg DRIVER_TYPE=$(params.DRIVER_TYPE) \
+        --build-arg DRIVER_OPEN=$(params.DRIVER_OPEN) \
+        --build-arg DRIVER_STREAM_TYPE=$(params.DRIVER_STREAM_TYPE) \
+        --build-arg DRIVER_EPOCH=1 \
+        --build-arg OPENSHIFT_VERSION=$(params.OPENSHIFT_VERSION) \
+        --build-arg RHEL_VERSION=${RHEL_VERSION} \
+        --build-arg RHEL_VERSION_MAJOR=${RHEL_VERSION_MAJOR} \
+        --build-arg KERNEL_VERSION=${KERNEL_VERSION} \
+        --build-arg KERNEL_VERSION_NOARCH=${KERNEL_VERSION_NOARCH} \
+        --build-arg BUILD_ARCH=$(params.BUILD_ARCH) \
+        --build-arg TARGET_ARCH=$(params.TARGET_ARCH) \
+        --build-arg OS_TAG=${OS_TAG} \
+        --build-arg CUDA_VERSION=$(params.CUDA_VERSION) \
+        --build-arg CUDA_DIST=${CUDA_DIST} \
+        --build-arg BASE_URL=$(params.NVIDIA_BASE_URL) \
+        --build-context signer=$(workspaces.signer.path) \
+        --format=$(params.FORMAT) --tls-verify=$(params.TLSVERIFY) \
+        -f $(params.DOCKERFILE) \
+        -t $(params.IMAGE_NAME):$(params.DRIVER_VERSION)-${KERNEL_VERSION_TAG}-${OS_TAG} \
+        .
+
+      [[ "$(params.SKIP_PUSH)" == "true" ]] && echo "Push skipped" && exit 0
+
+      if [[ "$(workspaces.dockerconfig.bound)" == "true" ]]; then
+
+        # if config.json exists at workspace root, we use that
+        if test -f "$(workspaces.dockerconfig.path)/config.json"; then
+          export DOCKER_CONFIG="$(workspaces.dockerconfig.path)"
+
+        # else we look for .dockerconfigjson at the root
+        elif test -f "$(workspaces.dockerconfig.path)/.dockerconfigjson"; then
+          cp "$(workspaces.dockerconfig.path)/.dockerconfigjson" "$HOME/.docker/config.json"
+          export DOCKER_CONFIG="$HOME/.docker"
+
+        # need to error out if neither files are present
+        else
+          echo "neither 'config.json' nor '.dockerconfigjson' found at workspace root"
+          exit 1
+        fi
+      fi
+
+      buildah push \
+        $(params.PUSH_EXTRA_ARGS) --tls-verify=$(params.TLSVERIFY) \
+        --digestfile /tmp/image-digest \
+        $(params.IMAGE_NAME):$(params.DRIVER_VERSION)-${KERNEL_VERSION_TAG}-${OS_TAG} \
+        docker://$(params.IMAGE_NAME):$(params.DRIVER_VERSION)-${KERNEL_VERSION_TAG}-${OS_TAG}
+      cat /tmp/image-digest | tee $(results.IMAGE_DIGEST.path)
+      echo -n "$(params.IMAGE_NAME):$(params.DRIVER_VERSION)-${KERNEL_VERSION_TAG}-${OS_TAG}" | tee $(results.IMAGE_URL.path)
+    securityContext:
+      capabilities:
+        add:
+        - SETFCAP
+    volumeMounts:
+    - mountPath: /var/lib/containers
+      name: varlibcontainers
+    workingDir: $(workspaces.source.path)$(params.CONTEXT)
+  volumes:
+  - emptyDir: {}
+    name: varlibcontainers
+  workspaces:
+  - name: source
+  - description: Signing key
+    name: signer
+  - description: An optional workspace that allows providing a .docker/config.json
+      file for Buildah to access the container registry. The file should be placed
+      at the root of the Workspace with name config.json or .dockerconfigjson.
+    name: dockerconfig
+    optional: true
+  - description: An optional workspace that allows providing the entitlement keys
+      for Buildah to access subscription. The mounted workspace contains entitlement.pem
+      and entitlement-key.pem.
+    mountPath: /tmp/entitlement
+    name: rhel-entitlement
+    optional: true

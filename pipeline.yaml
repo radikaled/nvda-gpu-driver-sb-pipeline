@@ -1,0 +1,135 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: nvidia-gpu-driver-builder
+spec:
+  params:
+  - default: 4.14.33
+    name: openshift_version
+    type: string
+  - default: x86_64
+    name: target_arch
+    type: string
+  - default: nvidia-gpu-driver
+    name: image_name
+    type: string
+  - default: 550.90.07
+    name: driver_version
+    type: string
+  - default: 12.3.2
+    name: cuda_version
+    type: string
+  - default: https://github.com/radikaled/gpu-driver-container.git
+    name: git_url
+    type: string
+  - default: /rhel9/precompiled
+    name: folder
+    type: string
+  - default: sbcompat
+    name: revision
+    type: string
+  tasks:
+  - name: get-driver-toolkit-image
+    params:
+    - name: SCRIPT
+      value: oc adm release info --image-for=driver-toolkit quay.io/openshift-release-dev/ocp-release:$(params.openshift_version)-$(params.target_arch)
+    - name: OPENSHIFT_VERSION
+      value: $(params.openshift_version)
+    - name: ARCH
+      value: $(params.target_arch)
+    runAfter:
+    - git-clone
+    taskRef:
+      kind: Task
+      name: get-driver-toolkit-image
+  - name: buildah-driver-image
+    params:
+    - name: DRIVER_TOOLKIT_IMAGE
+      value: $(tasks.get-driver-toolkit-image.results.DRIVER_TOOLKIT_IMAGE)
+    - name: IMAGE
+      value: asdasdsad
+    - name: BUILDER_IMAGE
+      value: registry.redhat.io/rhel8/buildah@sha256:aac6629389db17e99894c5bee0da01d4c8065d11d8c6f6e1602f9484290baa70
+    - name: STORAGE_DRIVER
+      value: vfs
+    - name: DOCKERFILE
+      value: ./Dockerfile
+    - name: CONTEXT
+      value: $(params.folder)
+    - name: TLSVERIFY
+      value: "true"
+    - name: FORMAT
+      value: oci
+    - name: BUILD_EXTRA_ARGS
+      value: ""
+    - name: PUSH_EXTRA_ARGS
+      value: ""
+    - name: SKIP_PUSH
+      value: "false"
+    - name: IMAGE_NAME
+      value: $(params.image_name)
+    - name: OPENSHIFT_VERSION
+      value: $(params.openshift_version)
+    - name: DRIVER_VERSION
+      value: $(params.driver_version)
+    - name: CUDA_VERSION
+      value: $(params.cuda_version)
+    runAfter:
+    - get-driver-toolkit-image
+    taskRef:
+      kind: Task
+      name: buildah-driver-image
+    workspaces:
+    - name: source
+      workspace: source
+    - name: signer
+      workspace: signer
+    - name: rhel-entitlement
+      workspace: subscription
+    - name: dockerconfig
+      workspace: dockerconfig
+  - name: git-clone
+    params:
+    - name: url
+      value: $(params.git_url)
+    - name: revision
+      value: $(params.revision)
+    - name: refspec
+      value: ""
+    - name: submodules
+      value: "true"
+    - name: depth
+      value: "1"
+    - name: sslVerify
+      value: "true"
+    - name: crtFileName
+      value: ca-bundle.crt
+    - name: subdirectory
+      value: ""
+    - name: sparseCheckoutDirectories
+      value: $(params.folder)
+    - name: deleteExisting
+      value: "true"
+    - name: httpProxy
+      value: ""
+    - name: httpsProxy
+      value: ""
+    - name: noProxy
+      value: ""
+    - name: verbose
+      value: "true"
+    - name: gitInitImage
+      value: registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel8@sha256:681dc67d2aa1dbecbf65ecd229c8b181dae533bf14b07543c1aeead36aed2198
+    - name: userHome
+      value: /home/git
+    taskRef:
+      kind: ClusterTask
+      name: git-clone
+    workspaces:
+    - name: output
+      workspace: source
+  workspaces:
+  - name: source
+  - name: signer
+  - name: subscription
+  - name: dockerconfig

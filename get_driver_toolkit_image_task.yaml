@@ -1,0 +1,38 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: get-driver-toolkit-image
+spec:
+  description: Modified oc-cli task which determines the driver-toolkit image from
+    an Openshift release payload.
+  params:
+  - default: 4.14.33
+    description: Openshift major/minor/patch version (e.g. 4.14.33)
+    name: OPENSHIFT_VERSION
+    type: string
+  - default: x86_64
+    description: Openshift architecture type
+    name: ARCH
+    type: string
+  results:
+  - description: driver-toolkit image version
+    name: DRIVER_TOOLKIT_IMAGE
+    type: string
+  steps:
+  - computeResources: {}
+    env:
+    - name: HOME
+      value: /tekton/home
+    image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+    name: oc
+    script: |
+      #!/usr/bin/env bash
+
+      RELEASE_PAYLOAD=quay.io/openshift-release-dev/ocp-release:$(params.OPENSHIFT_VERSION)-$(params.ARCH)
+
+      # NOTE: oc-cli will return a trailing newline make sure to sanitize the result output
+      oc adm release info --image-for=driver-toolkit \
+        ${RELEASE_PAYLOAD} | tr -d '\n' | tee $(results.DRIVER_TOOLKIT_IMAGE.path)
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
